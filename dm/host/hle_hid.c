@@ -189,7 +189,10 @@ uint32_t dm_player_npad(int p) { return p <= 0 ? connected_id() : (uint32_t)p; }
 // Handheld, bit 9 Other: all of them until SetSupportedNpadIdType, as the hid service starts)
 static _Atomic uint32_t g_players = 1, g_ids_supported = 0x3ff;
 static uint32_t id_bit(uint32_t id) { return id < DM_PLAYERS ? 1u << id : id == NPAD_HANDHELD ? 1u << 8 : id == 0x10 ? 1u << 9 : 0; }
-static int reported(int p) { return p == 0 || (atomic_load(&g_players) >> p & 1 && atomic_load(&g_ids_supported) & id_bit((uint32_t)p)); }
+// DM_KBD_PAD=0: the Mac keyboard is not a controller, so player 1 is connected only while a pad holds its slot (otherwise Mario Kart counts the keyboard on top of the phones)
+static int kbd_is_pad(void) { const char *e = getenv("DM_KBD_PAD"); return !(e && !strcmp(e, "0")); }
+static int player1_on(void) { return kbd_is_pad() || (atomic_load(&g_players) & 1); }
+static int reported(int p) { return (p == 0 ? player1_on() : (atomic_load(&g_players) >> p & 1)) && (p == 0 || (atomic_load(&g_ids_supported) & id_bit((uint32_t)p))); }
 // Players with a controller whose npad the game does not support. A one-player game (no npad past No1 supported) gets them as player 1, so any controller plays it; in a game for
 // fewer players than are connected (a fifth controller in a four-player game) they are not used, as on the Switch, where the system does not connect them
 static uint32_t unsupported_players(void) {
@@ -199,7 +202,7 @@ static uint32_t unsupported_players(void) {
 static int one_player(void) { return !(atomic_load(&g_ids_supported) & ((1u << DM_PLAYERS) - 2)); }
 static uint32_t merged_players(void) { return one_player() ? unsupported_players() : 0; }
 static int player_of(uint32_t id) {   // the reported player on npad id; -1 when none
-    if (id == connected_id()) return 0;
+    if (id == connected_id()) return player1_on() ? 0 : -1;
     return id > 0 && id < DM_PLAYERS && reported((int)id) ? (int)id : -1;
 }
 static uint32_t style_for_player(uint32_t id, int p) { return p < 0 ? 0 : id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY; }
@@ -220,9 +223,10 @@ static void note_merged(void) {   // logs the players whose npad the game does n
     }
 }
 void dm_pad_players(uint32_t mask) {
-    mask = (mask | 1u) & ((1u << DM_PLAYERS) - 1);
+    mask &= (1u << DM_PLAYERS) - 1;
+    if (kbd_is_pad()) mask |= 1u;
     uint32_t old = atomic_exchange(&g_players, mask);
-    for (int p = 1; p < DM_PLAYERS; p++) if ((old ^ mask) >> p & 1) {
+    for (int p = 0; p < DM_PLAYERS; p++) if ((old ^ mask) >> p & 1) {
         if (!(mask >> p & 1)) dm_pad_set_player(p, 0, 0, 0, 0, 0);   // a controller that went away leaves nothing pressed
         if (atomic_load(&g_ids_supported) & id_bit((uint32_t)p)) style_changed((uint32_t)p);
     }

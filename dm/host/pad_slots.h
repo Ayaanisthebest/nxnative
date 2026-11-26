@@ -31,6 +31,23 @@ static int pad_slot_free(pad_slots *s, const void *owner) {
     int p = pad_slot_of(s, owner); if (p >= 0) s->owner[p] = NULL;
     return p;
 }
+// Move owner into player 1, swapping with whoever holds that slot (another controller, or an empty slot kept for a name).
+// *other is the previous holder, or NULL when player 1 was empty. Returns 0, or -1 when owner holds no slot. Already player 1 is a no-op.
+static int pad_slot_claim1(pad_slots *s, const void *owner, const void **other) {
+    int mine = pad_slot_of(s, owner);
+    if (other) *other = NULL;
+    if (mine < 0) return -1;
+    if (mine == 0) return 0;
+    const void *was = s->owner[0];
+    if (other) *other = was;
+    char tmp[64];
+    memcpy(tmp, s->last[0], sizeof tmp);
+    memcpy(s->last[0], s->last[mine], sizeof tmp);
+    memcpy(s->last[mine], tmp, sizeof tmp);
+    s->owner[0] = owner;
+    s->owner[mine] = was;
+    return 0;
+}
 static uint32_t pad_slot_mask(const pad_slots *s) {   // bit p: slot p is held
     uint32_t m = 0; for (int i = 0; i < DM_PLAYERS; i++) if (s->owner[i]) m |= 1u << i;
     return m;

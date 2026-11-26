@@ -1,0 +1,47 @@
+<!doctype html><html><head><meta charset='utf-8'><title>NX Pads</title>
+<style>
+body{margin:0;padding:20px;background:#111214;color:#ddd;font:500 14px -apple-system,system-ui,sans-serif}
+h1{font-size:18px;margin:0 0 4px}#hint{color:#888;margin-bottom:18px}
+#grid{display:flex;flex-wrap:wrap;gap:16px}
+.card{background:#1b1c20;border:1px solid #2c2e35;border-radius:14px;padding:14px;width:380px}
+.card.stale{opacity:.45}
+.hd{display:flex;gap:10px;align-items:center;margin-bottom:10px}.hd b{font-size:16px;color:#fff;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pb{padding:3px 9px;border-radius:999px;color:#fff;font-weight:700}
+.kd{color:#888;font-size:12px}
+.st{display:flex;gap:14px;color:#9aa;font-variant-numeric:tabular-nums;margin-bottom:12px}.st span b{color:#fff}
+.row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.k{min-width:34px;padding:5px 7px;border-radius:7px;background:#2a2c33;color:#aaa;text-align:center;font-size:12px}
+.k.on{color:#fff}
+.sticks{display:flex;gap:18px}.stk{position:relative;width:90px;height:90px;border-radius:50%;background:#24262c;border:1px solid #34373f}
+.dot{position:absolute;width:18px;height:18px;margin:-9px;border-radius:50%;left:50%;top:50%}
+</style></head><body>
+<h1>NX Pads</h1><div id='hint'>Phones open <b id='addr'>&hellip;</b> on the same Wi-Fi.</div><div id='grid'></div>
+<script>
+var C=['#ff5a5f','#3fa7ff','#ffcf3f','#3ddc84','#c77dff','#ff8c42','#2ee6d6','#ff6fb5'];
+var N=['A','B','X','Y','L3','R3','L','R','ZL','ZR','+','\u2212','\u2190','\u2191','\u2192','\u2193'],cards={};
+var KIND={phone:'phone',pad:'controller',keys:'keyboard'};
+function card(key){if(cards[key])return cards[key];var c=document.createElement('div');c.className='card';
+ var keys='';for(var i=0;i<16;i++)keys+='<span class=k>'+N[i]+'</span>';
+ c.innerHTML='<div class=hd><span class=pb></span><b class=nm></b><span class=kd></span></div><div class=st><span>round trip <b class=rtt>\u2013</b></span><span>rate <b class=hz>\u2013</b>/s</span></div>'+
+  '<div class=row>'+keys+'</div><div class=sticks><div class=stk><div class=dot></div></div><div class=stk><div class=dot></div></div></div>';
+ document.getElementById('grid').appendChild(c);cards[key]={el:c,t:0};return cards[key];}
+function upd(m){var p=+m[1],b=+m[2],kind=m[9],key=m[10],name=m.slice(11).join(' '),c=card(key),col=C[(p-1)%8];c.t=performance.now();
+ var pb=c.el.querySelector('.pb');pb.textContent='P'+p;pb.style.background=col;
+ var ks=c.el.querySelectorAll('.k');for(var i=0;i<16;i++){var on=!!(b>>i&1);ks[i].classList.toggle('on',on);ks[i].style.background=on?col:'';}
+ var d=c.el.querySelectorAll('.dot'),s=[+m[3],+m[4],+m[5],+m[6]].map(function(v){return v/32767;});
+ d[0].style.background=d[1].style.background=col;
+ d[0].style.left=(50+s[0]*40)+'%';d[0].style.top=(50-s[1]*40)+'%';d[1].style.left=(50+s[2]*40)+'%';d[1].style.top=(50-s[3]*40)+'%';
+ c.el.querySelector('.rtt').textContent=kind=='phone'?(+m[7]).toFixed(1)+' ms':'wired';c.el.querySelector('.hz').textContent=kind=='phone'?m[8]:'\u2013';
+ c.el.querySelector('.nm').textContent=name;c.el.querySelector('.kd').textContent=KIND[kind]||kind;}
+setInterval(function(){for(var k in cards){var c=cards[k];c.el.classList.toggle('stale',performance.now()-c.t>3000&&c.el.querySelector('.kd').textContent=='phone');}},250);
+var wait=null,q={};
+function paint(){wait=null;var p=q;q={};for(var k in p)upd(p[k]);}
+function connect(){var ws=new WebSocket((location.protocol=='https:'?'wss://':'ws://')+location.host+'/mon');var k;
+ ws.onopen=function(){k=setInterval(function(){ws.send('k');},500);};
+ ws.onmessage=function(e){var m=e.data.split(' ');
+  if(m[0]=='u'){q[m[10]]=m;if(!wait)wait=requestAnimationFrame(paint);}
+  if(m[0]=='a')document.getElementById('addr').textContent=m[1];
+  if(m[0]=='x'&&cards[m[1]]){delete q[m[1]];cards[m[1]].el.remove();delete cards[m[1]];}};
+ ws.onclose=function(){clearInterval(k);setTimeout(connect,1000);};}
+connect();
+</script></body></html>

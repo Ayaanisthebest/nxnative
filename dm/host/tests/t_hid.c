@@ -64,6 +64,15 @@ static void t_slots(void) {
     CHECK(pad_slot_take(&s, NULL, "x") == -1 && pad_slot_free(&s, NULL) == -1, "no owner, no slot");
     memset(&s, 0, sizeof s);   // DM_KBD_PLAYER=own: the keyboard holds player 1 for good
     CHECK(pad_slot_take(&s, &kbd, "keyboard") == 0 && pad_slot_take(&s, &a, "Xbox Wireless Controller") == 1, "with the keyboard on its own the first controller is player 2");
+    const void *other = NULL;
+    CHECK(pad_slot_claim1(&s, &a, &other) == 0 && other == &kbd && pad_slot_of(&s, &a) == 0 && pad_slot_of(&s, &kbd) == 1, "claim swaps this controller into player 1");
+    CHECK(!strcmp(s.last[0], "Xbox Wireless Controller") && !strcmp(s.last[1], "keyboard"), "claim swaps the names, so a reconnect keeps the new player");
+    CHECK(pad_slot_claim1(&s, &a, &other) == 0 && other == NULL && pad_slot_of(&s, &a) == 0, "claim while already player 1 changes nothing");
+    memset(&s, 0, sizeof s);
+    CHECK(pad_slot_take(&s, &a, "phone a") == 0 && pad_slot_take(&s, &b, "phone b") == 1, "two phones");
+    CHECK(pad_slot_claim1(&s, &b, &other) == 0 && other == &a && pad_slot_of(&s, &b) == 0 && pad_slot_of(&s, &a) == 1, "the second phone takes player 1 and the first moves into its slot");
+    CHECK(pad_slot_free(&s, &b) == 0 && pad_slot_claim1(&s, &a, &other) == 0 && other == NULL && pad_slot_of(&s, &a) == 0 && !s.owner[1], "claim of an empty player 1 leaves the old slot free");
+    CHECK(pad_slot_claim1(&s, &c, &other) == -1, "a controller that holds no slot cannot claim player 1");
 }
 
 static void t_npads(void) {

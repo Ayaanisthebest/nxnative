@@ -1,3 +1,17 @@
+> **This is a modified copy of [seedds/nxnative](https://github.com/seedds/nxnative).**
+> The original project is the work of its authors. This copy adds my own changes on top of upstream commit `beea17c` and is not affiliated with or endorsed by them.
+
+## My changes
+
+- **Phones as controllers:** with `DM_PHONE_PADS=1`, phones on the same Wi-Fi open a touch gamepad page served by the Mac and each takes a player slot, with reconnect, rumble, tilt and a "Take P1" button. See `docs/playing.md`.
+- **NX Pads:** a Mac companion app (`dm/mac/pads`) showing a QR code for phones and a live dashboard of every player's input, plus a lobby server for testing before a game starts.
+- **Keyboard pad switch:** `DM_KBD_PAD=0` stops the Mac keyboard counting as a controller.
+- **Display fix:** the picture no longer stays on the last frame when the display link is detached.
+
+The upstream README follows. Its download links and badges point to the original project, not to this copy.
+
+---
+
 # nxnative
 
 Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game (its NSP files) and your `prod.keys`; one script turns them into an IPA that you sideload.

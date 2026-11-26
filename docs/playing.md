@@ -40,6 +40,12 @@ Lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in
 
 A Mac app shows the game's settings in a window before the game starts ([The Mac settings window](settings.md#the-mac-settings-window)). Its `env.txt` is `~/Library/Application Support/nxnative/<title ID>/env.txt`, and its log is `~/Library/Logs/nxnative/<title ID>.log`. [NX2Apple](https://github.com/LNPANDY/NX2Apple)'s library can also start it with the settings you pick there.
 
+### Phones as controllers
+
+Add `DM_PHONE_PADS=1` to the game's `env.txt`. The window's title bar then shows an address such as `https://192.168.1.20:8765`: open it in Safari or Chrome on each phone on the same Wi-Fi and turn the phone sideways. The first visit asks you to trust this Mac's certificate (Show Details, then visit). Every phone is a controller of its own and takes the next player, as a physical controller does (up to 8, mixed with real controllers); a phone that reconnects gets its player back. Auto-Lock should be off while playing. The pad has two layouts, switched with the button at the top: **Pro**, with both sticks and their presses, the D-pad, A B X Y, L R ZL ZR, + and −; and **Kart**, for racing games, with steering anywhere on the left half and big GAS (A), BRAKE (B), DRIFT (R), ITEM (L) and LOOK (X) buttons, plus an AUTO GAS switch that holds A. **TILT** uses the phone as a wheel in the Kart layout (hold it level, then tap TILT) and feeds the game's motion sensor. Presses buzz the phone; Android also buzzes when the game rumbles. Tap the name at the top to set the name the Mac shows. Anyone on the same network can open the address, so leave it off on networks you don't trust. `DM_PHONE_PADS=<port>` picks another port.
+
+**NX Pads** (`dm/mac/pads`, built with `dm/mac/pads/build.sh [folder]`) is a Mac app for the host's side: open it while the game runs and it shows a QR code of the address for phones to scan, and a live dashboard of every player's buttons and sticks (phones with their round trip, controllers, the keyboard). `<address>/monitor` shows the same dashboard in a browser.
+
 ## Shaders on first sight
 
 Short stutters the first time a new scene appears are normal: the app compiles graphics for it once and remembers them for the next launch. What it remembered, and what the game's list names, is built before the game starts, behind "Preparing shaders" and a progress bar when that takes more than half a second.

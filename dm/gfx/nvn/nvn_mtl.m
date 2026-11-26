@@ -11121,6 +11121,14 @@ void mtl_present_wait(uint64_t tk) {
             g_rescue_mode = g_dm_present_link; g_rescue_n++; g_rescue_back_at = now + g_rescue_back_ns;
             MLOG("display link silent for %.0f ms while active: the present thread takes drawables itself (rescue #%llu), the link is tried again in %.0f s", (now - from) / 1e6, (unsigned long long)g_rescue_n, g_rescue_back_ns / 1e9);
             g_rescue_back_ns = g_rescue_back_ns < 30000000000ull ? g_rescue_back_ns * 2 : 60000000000ull;
+            // Detach now. Waiting for the link thread to drop the layer left the picture on the last frame, because this wait drops every newer frame while that thread is silent.
+            CAMetalDisplayLink *dead = g_link; CFRunLoopRef rl = g_link_rl;
+            g_link = nil; g_link_rl = NULL; g_link_started = 0; g_link_owns_layer = 0;
+            pthread_cond_broadcast(&g_pq_cv);
+            pthread_mutex_unlock(&g_pq_mu);
+            if (dead) [dead invalidate];
+            if (rl) CFRunLoopStop(rl);
+            pthread_mutex_lock(&g_pq_mu);
         }
         if (active && !g_stall_red && elapsed >= STALL_RED_NS) { g_stall_red = 1; MLOG("[RED] display link silent for %.1f s while active; presenting relies entirely on fallback frame drops, the picture is frozen", elapsed / 1e9); }
     }

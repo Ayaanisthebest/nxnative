@@ -5,6 +5,7 @@
 // Controllers: buttons by position as on the iPhone (right A, bottom B, top X, left Y), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
+// DM_PHONE_PADS=1 adds phones on the same Wi-Fi as controllers (phonepad_mac.m): each phone that opens the address in the window's subtitle takes a player like a controller does.
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
@@ -17,13 +18,16 @@
 #include "haptics_apple.h"
 #include "motion_apple.h"
 #include "motion_pro_mac.h"
+#include "phonepad_mac.h"
 #include <signal.h>
+#include <stdatomic.h>
 #include <math.h>
+#include <pthread.h>
 
 static CAMetalLayer *g_layer;
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
-static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
+static _Atomic int g_input_on = 1;   // the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume). The phone thread reads it
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 static _Atomic int g_screen_fps;   // the window's screen's maximumFramesPerSecond, kept up to date when the window moves to another screen
@@ -86,9 +90,12 @@ void front_screen_match(int fps) {
     if (!g_layer || g_match_want == fps) return;   // no window (a windowless run's main thread runs the guest), or the rate as before
     g_match_want = fps; dispatch_async(dispatch_get_main_queue(), ^{ screen_match_apply(); });
 }
+static int g_kbd_pad = 1;   // 0 with DM_KBD_PAD=0: keys are not a controller and are not shown on the pad dashboard
 static void push(void) {
+    if (!g_kbd_pad) return;
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
     dm_input_set(g_btn, lx, ly, 0, 0);
+    phonepad_monitor(0, "keys", "kbd", "Keyboard", g_btn, lx, ly, 0, 0);
 }
 static int key_bit(unsigned short code) {
     switch (code) {
@@ -101,7 +108,7 @@ static int key_bit(unsigned short code) {
     return -1;
 }
 static void on_key(NSEvent *e, int down) {
-    if (!g_input_on) return;
+    if (!g_kbd_pad || !g_input_on) return;
     unsigned short c = e.keyCode;
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
     int b = key_bit(c);
@@ -118,7 +125,11 @@ static void on_key(NSEvent *e, int down) {
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge, g_kbd_own;
+static const char g_kbd_slot;   // DM_KBD_PLAYER=own: this address holds player 1 until a phone takes it
+static pthread_mutex_t g_slot_mu;   // recursive: a phone's state and a Take P1 swap both touch the slots, and a connect drops the old socket first
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
+static const char *pad_name(GCController *c);
+static void pad_key(GCController *c, char *out, size_t cap) { snprintf(out, cap, "pad-%lx", (unsigned long)(uintptr_t)(__bridge void *)c); }   // the dashboard's key for it (phonepad_monitor)
 static void pad_read(GCExtendedGamepad *g) {
     if (!g_input_on) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
@@ -130,7 +141,10 @@ static void pad_read(GCExtendedGamepad *g) {
     K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
     K(g.dpad.left, DM_BTN_LEFT); K(g.dpad.up, DM_BTN_UP); K(g.dpad.right, DM_BTN_RIGHT); K(g.dpad.down, DM_BTN_DOWN);
     #undef K
-    dm_pad_set_player(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
+    int32_t lx = pad_axis(g.leftThumbstick.xAxis.value), ly = pad_axis(g.leftThumbstick.yAxis.value), rx = pad_axis(g.rightThumbstick.xAxis.value), ry = pad_axis(g.rightThumbstick.yAxis.value);
+    dm_pad_set_player(p, m, lx, ly, rx, ry);
+    char key[32]; pad_key(g.controller, key, sizeof key);
+    phonepad_monitor(p, "pad", key, pad_name(g.controller), m, lx, ly, rx, ry);
 }
 // Home and Capture: without this macOS takes them as system gestures (Home opens the Games app); the host gives them no function
 static void pad_keep_system_buttons(GCController *c) { for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled; }
@@ -153,7 +167,7 @@ static void pads_changed(GCController *gone) {
             dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
             pad_read(c.extendedGamepad);
         }
-        if (gone) dm_motion_detach(gone, 0);
+        if (gone) { dm_motion_detach(gone, 0); char key[32]; pad_key(gone, key, sizeof key); phonepad_monitor_gone(key); }
         if (!any) { dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }
         pro_players_changed(gone);
         return;
@@ -162,6 +176,7 @@ static void pads_changed(GCController *gone) {
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]])) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
         g_held[p].extendedGamepad.valueChangedHandler = nil;
+        { char key[32]; pad_key(g_held[p], key, sizeof key); phonepad_monitor_gone(key); }
         dm_motion_detach(g_held[p], p);
         dm_haptics_apple_controller(p, nil);
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
@@ -189,7 +204,7 @@ static void input_release(void) {
     g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
-    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);   // physical controllers only; phones are not tied to the Mac window
 }
 static void input_resume(void) {
     g_input_on = 1;
@@ -198,14 +213,89 @@ static void input_resume(void) {
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
 }
 static void pads_start(void) {
+    pthread_mutexattr_t a; pthread_mutexattr_init(&a); pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE); pthread_mutex_init(&g_slot_mu, &a); pthread_mutexattr_destroy(&a);
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
-    e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
-    static const char kbd = 0;
-    if (g_kbd_own) pad_slot_take(&g_slots, &kbd, "keyboard");   // holds player 1 for good
-    LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
+    e = getenv("DM_KBD_PAD"); g_kbd_pad = !(e && !strcmp(e, "0"));
+    e = getenv("DM_KBD_PLAYER"); g_kbd_own = g_kbd_pad && !g_merge && e && !strcmp(e, "own");
+    if (g_kbd_own) pad_slot_take(&g_slots, &g_kbd_slot, "keyboard");   // holds player 1 until a phone takes it
+    LOG("front end: %s", !g_kbd_pad ? "keyboard is not a controller (DM_KBD_PAD=0)" : g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     pads_changed(nil);
     dm_motion_pro_start(pro_devices_changed);
+}
+// Phones (phonepad_mac.h) hold player slots as controllers do, keyed on the server's connection; a phone's name is its own id, so a phone that reconnects gets its player back
+static void phone_disconnected(const void *owner);
+static int phone_claim(const void *owner, const void **other, int *other_at);
+static int phone_connected(const void *owner, const char *name) {
+    if (g_merge) { LOG("controller '%s' connected: player 1 (DM_PAD_MERGE)", name); dm_haptics_route(0, 1); return 0; }
+    pthread_mutex_lock(&g_slot_mu);
+    // The old socket stays up for a moment after the page reconnects. Leaving it in its slot pushes the same phone onto player 5+, which a four-player game never reads.
+    if (name && name[0]) for (int i = 0; i < DM_PLAYERS; i++) if (g_slots.owner[i] && g_slots.owner[i] != owner && !strcmp(g_slots.last[i], name)) { phone_disconnected(g_slots.owner[i]); break; }
+    int p = pad_slot_take(&g_slots, owner, name);
+    if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", name, DM_PLAYERS); pthread_mutex_unlock(&g_slot_mu); return -1; }
+    char nb[16]; npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)", name, p + 1, nb);
+    dm_pad_players(pad_slot_mask(&g_slots));
+    dm_haptics_route(p, 1);   // the game rumbles this player; the phone page turns that into a buzz
+    pthread_mutex_unlock(&g_slot_mu);
+    return p;
+}
+// Phones keep playing when the Mac window is not key: the people holding them are not at the Mac
+static void phone_state(const void *owner, int player, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    pthread_mutex_lock(&g_slot_mu);
+    int now = pad_slot_of(&g_slots, owner);   // Take P1 may have moved this phone since the packet was read
+    if (!g_merge && now >= 0) player = now;
+    int p = g_merge ? 0 : player;
+    if (p >= 0) dm_pad_set_player(p, buttons, lx, ly, rx, ry);
+    pthread_mutex_unlock(&g_slot_mu);
+    if (p < 0) return;
+    dm_vibration vib[2] = {dm_haptics_actual(p, 0), dm_haptics_actual(p, 1)};
+    phonepad_rumble(owner, dm_haptics_level(vib, 2, 1.2f).intensity);
+}
+static void phone_motion(const void *owner, int player, const float acc[3], const float rot[3]) {
+    pthread_mutex_lock(&g_slot_mu);
+    int now = pad_slot_of(&g_slots, owner);
+    if (!g_merge && now >= 0) player = now;
+    int p = g_merge ? 0 : player;
+    if (p >= 0) dm_motion_set(p, acc, rot);
+    pthread_mutex_unlock(&g_slot_mu);
+}
+// "Take P1" on the phone: this phone becomes player 1 immediately. Whoever held that slot (another phone, a controller, or a
+// name kept for a reconnect) moves into the slot this phone left, and both are told. Buttons on the two slots are cleared so a held
+// press does not stay on the player that no longer owns it; the next packet from each phone lands on its new player.
+static int phone_claim(const void *owner, const void **other, int *other_at) {
+    pthread_mutex_lock(&g_slot_mu);
+    *other = NULL; *other_at = -1;
+    int mine = pad_slot_of(&g_slots, owner);
+    if (mine < 0) { pthread_mutex_unlock(&g_slot_mu); return -1; }
+    if (mine == 0) { pthread_mutex_unlock(&g_slot_mu); return 0; }
+    const void *was = NULL;
+    pad_slot_claim1(&g_slots, owner, &was);
+    GCController *from0 = g_held[0], *from_mine = g_held[mine];
+    g_held[0] = from_mine; g_held[mine] = from0;
+    if (from0) { dm_motion_detach(from0, 0); dm_haptics_apple_controller(0, nil); }
+    dm_motion_clear(0); dm_motion_clear(mine);
+    dm_pad_set_player(0, 0, 0, 0, 0, 0);
+    dm_pad_set_player(mine, 0, 0, 0, 0, 0);
+    if (g_held[mine]) { dm_motion_attach(g_held[mine], mine); dm_haptics_apple_controller(mine, g_held[mine]); pad_read(g_held[mine].extendedGamepad); }
+    dm_haptics_route(0, 1);
+    int other_phone = was && was != &g_kbd_slot && !from0;
+    dm_haptics_route(mine, other_phone ? 1 : 0);
+    if (other_phone) { *other = was; *other_at = mine; }
+    dm_pad_players(pad_slot_mask(&g_slots));
+    LOG("controller '%s' took player 1 (player %d is now '%s')", g_slots.last[0], mine + 1, g_slots.last[mine][0] ? g_slots.last[mine] : "free");
+    pthread_mutex_unlock(&g_slot_mu);
+    return 0;
+}
+static void phone_disconnected(const void *owner) {
+    if (g_merge) { dm_pad_set(0, 0, 0, 0, 0); dm_motion_clear(0); return; }
+    pthread_mutex_lock(&g_slot_mu);
+    int p = pad_slot_free(&g_slots, owner); if (p < 0) { pthread_mutex_unlock(&g_slot_mu); return; }
+    char nb[16]; npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", g_slots.last[p], p + 1, nb);
+    dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    dm_motion_clear(p);
+    dm_haptics_route(p, 0);
+    dm_pad_players(pad_slot_mask(&g_slots));
+    pthread_mutex_unlock(&g_slot_mu);
 }
 
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,
@@ -289,6 +379,9 @@ void front_run(void (*guest)(void)) {
                 pads_changed(conn ? nil : c); }];
         dm_haptics_apple_init();
         pads_start();
+        const char *phones = phonepad_start((phonepad_callbacks){phone_connected, phone_state, phone_disconnected, phone_motion, phone_claim});
+        if (phones) win.subtitle = [NSString stringWithFormat:@"Phones: %s", phones];
+        static int phones_on; phones_on = phones != NULL;   // the game is told it lost focus only without phones, or it pauses while they play
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
@@ -305,7 +398,7 @@ void front_run(void (*guest)(void)) {
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
         [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
         [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized) dm_focus_set(2); }];
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized && !phones_on) dm_focus_set(2); }];
         [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
